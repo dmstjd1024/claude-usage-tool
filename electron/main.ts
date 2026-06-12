@@ -385,6 +385,70 @@ function formatResetTime(context?: string): string {
   return '';
 }
 
+// Parse remaining minutes until reset from context strings.
+// Returns null if no hr/min duration can be extracted (e.g. date-based resets).
+function parseRemainingMinutes(context?: string): number | null {
+  if (!context) return null;
+  const enMatch = context.match(/(\d+)\s*hr?\s*(\d+)?\s*min?/i);
+  if (enMatch) {
+    return parseInt(enMatch[1], 10) * 60 + (enMatch[2] ? parseInt(enMatch[2], 10) : 0);
+  }
+  const krMatch = context.match(/(\d+)\s*시간\s*(\d+)?\s*분?/);
+  if (krMatch) {
+    return parseInt(krMatch[1], 10) * 60 + (krMatch[2] ? parseInt(krMatch[2], 10) : 0);
+  }
+  const minOnly = context.match(/(\d+)\s*min/i) || context.match(/(\d+)\s*분/);
+  if (minOnly) {
+    return parseInt(minOnly[1], 10);
+  }
+  return null;
+}
+
+// Draw a circular gauge (clock-style) as a template tray icon.
+// `fraction` (0..1) is the portion filled clockwise from 12 o'clock.
+// Rendered at 2x (32px) for retina; template image = alpha only, macOS tints it.
+const SESSION_LENGTH_MINUTES = 5 * 60;
+
+function createGaugeIcon(fraction: number): Electron.NativeImage {
+  const size = 32;
+  const center = size / 2;
+  const outerR = 15;
+  const innerR = 10; // ring thickness = outerR - innerR
+  const f = Math.max(0, Math.min(1, fraction));
+  const fillAngle = f * Math.PI * 2;
+
+  const buffer = Buffer.alloc(size * size * 4); // transparent by default
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = x + 0.5 - center;
+      const dy = y + 0.5 - center;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > outerR || dist < innerR) continue;
+
+      // Angle clockwise from 12 o'clock (top).
+      let angle = Math.atan2(dx, -dy);
+      if (angle < 0) angle += Math.PI * 2;
+
+      // Soft edge anti-aliasing on the ring borders.
+      const edge = Math.min(outerR - dist, dist - innerR, 1);
+      const ringAlpha = Math.max(0, Math.min(1, edge));
+      // Filled portion is opaque; the rest is a faint track.
+      const filled = angle <= fillAngle;
+      const a = Math.round((filled ? 255 : 70) * ringAlpha);
+
+      const i = (y * size + x) * 4;
+      buffer[i] = 0;       // R (template: color ignored, alpha used)
+      buffer[i + 1] = 0;   // G
+      buffer[i + 2] = 0;   // B
+      buffer[i + 3] = a;   // A
+    }
+  }
+
+  const icon = nativeImage.createFromBuffer(buffer, { width: size, height: size, scaleFactor: 2 });
+  icon.setTemplateImage(true);
+  return icon;
+}
+
 function updateTrayTitle(claudeUsage: { isAuthenticated: boolean; bars?: Array<{ percentage: number; label?: string; context?: string; used?: number; limit?: number }> } | null) {
   if (!tray) return;
   if (!claudeUsage || !claudeUsage.isAuthenticated) {
@@ -397,12 +461,14 @@ function updateTrayTitle(claudeUsage: { isAuthenticated: boolean; bars?: Array<{
   ) || claudeUsage.bars?.[0];
 
   if (sessionBar !== undefined) {
-    const resetTime = formatResetTime(sessionBar.context);
-    const parts = [`${sessionBar.percentage}%`];
-    if (resetTime) {
-      parts.push(resetTime);
+    tray.setTitle(` ${sessionBar.percentage}%`);
+
+    // Circular gauge shows remaining session time (5h max), filled clockwise.
+    const remaining = parseRemainingMinutes(sessionBar.context);
+    if (remaining !== null) {
+      const fraction = remaining / SESSION_LENGTH_MINUTES;
+      tray.setImage(createGaugeIcon(fraction));
     }
-    tray.setTitle(` ${parts.join(' | ')}`);
   } else {
     tray.setTitle('');
   }
